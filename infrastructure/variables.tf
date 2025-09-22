@@ -1,36 +1,47 @@
 variable "aws_region" {
-  description = "AWS region where resources will be created"
+  description = "AWS region for the deployment"
   type        = string
-}
-
-variable "availability_zone" {
-  description = "Availability Zone for the resources"
-  type        = string
+  default     = "us-east-1"
 }
 
 variable "project_prefix" {
-  description = "Prefix to be used for all resource names"
+  description = "Prefix for all resource names to ensure uniqueness"
   type        = string
-  default     = "egress-fw"
+  default     = "tf-net-fw"
+}
+
+variable "availability_zones" {
+  description = "List of Availability Zones to deploy resources into"
+  type        = list(string)
+  default     = ["us-east-1a", "us-east-1b"]
 }
 
 variable "inspection_vpc_cidr" {
-  description = "CIDR block for the inspection VPC"
+  description = "CIDR block for the Inspection VPC"
   type        = string
   default     = "10.0.0.0/16"
 }
 
-variable "spoke_vpc_cidr" {
-  description = "CIDR block for the spoke VPC"
-  type        = string
-  default     = "10.1.0.0/16"
+variable "spoke_vpcs" {
+  description = "A map of spoke VPC configurations"
+  type = map(object({
+    cidr_block = string
+  }))
+  default = {
+    "workload-a" = {
+      cidr_block = "10.1.0.0/16"
+    },
+    "workload-b" = {
+      cidr_block = "10.2.0.0/16"
+    }
+  }
 }
 
 variable "tags" {
-  description = "Additional tags for all resources"
+  description = "Common tags to apply to all resources"
   type        = map(string)
   default     = {
-    Environment = "production"
-    Terraform   = "true"
+    Project   = "Terraform-Network-Firewall"
+    ManagedBy = "Terraform"
   }
 }

@@ -1,3 +1,12 @@
+terraform {
+  required_providers {
+    time = {
+      source  = "hashicorp/time"
+      version = ">= 0.9.1"
+    }
+  }
+}
+
 # Stateful rule group for egress filtering
 resource "aws_networkfirewall_rule_group" "stateful_egress" {
   capacity = 100
@@ -16,11 +25,18 @@ resource "aws_networkfirewall_rule_group" "stateful_egress" {
       }
     }
   }
-
   tags = var.tags
 }
 
-# Firewall policy that uses the rule group
+# Introduce a delay to work around an AWS API race condition.
+# This ensures the rule group is fully propagated before the policy is created.
+resource "time_sleep" "wait_for_rule_group" {
+  create_duration = "30s"
+
+  depends_on = [aws_networkfirewall_rule_group.stateful_egress]
+}
+
+# Firewall policy that uses the stateful rule group
 resource "aws_networkfirewall_firewall_policy" "main" {
   name = "${var.name_prefix}-policy"
 
@@ -28,7 +44,12 @@ resource "aws_networkfirewall_firewall_policy" "main" {
     stateless_default_actions          = ["aws:forward_to_sfe"]
     stateless_fragment_default_actions = ["aws:forward_to_sfe"]
 
+    stateful_engine_options {
+      rule_order = "DEFAULT_ACTION_ORDER"
+    }
+
     stateful_rule_group_reference {
+      # Priority is not allowed when rule_order is DEFAULT_ACTION_ORDER
       resource_arn = aws_networkfirewall_rule_group.stateful_egress.arn
     }
 
@@ -36,38 +57,23 @@ resource "aws_networkfirewall_firewall_policy" "main" {
   }
 
   tags = var.tags
+
+  # Depend on the sleep timer instead of directly on the rule group
+  depends_on = [time_sleep.wait_for_rule_group]
 }
 
-# Network Firewall
+# AWS Network Firewall
 resource "aws_networkfirewall_firewall" "main" {
   name                = "${var.name_prefix}-firewall"
   firewall_policy_arn = aws_networkfirewall_firewall_policy.main.arn
   vpc_id              = var.vpc_id
 
-  subnet_mapping {
-    subnet_id = var.subnet_id
+  dynamic "subnet_mapping" {
+    for_each = toset(var.subnet_ids)
+    content {
+      subnet_id = subnet_mapping.value
+    }
   }
 
   tags = var.tags
-}
-
-# Data source to get the firewall's endpoints
-data "aws_networkfirewall_firewall" "main" {
-  name = aws_networkfirewall_firewall.main.name
-
-  depends_on = [aws_networkfirewall_firewall.main]
-}
-
-# Route from TGW attachment to firewall
-resource "aws_route" "to_firewall" {
-  route_table_id         = var.tgw_attachment_route_table_id
-  destination_cidr_block = "0.0.0.0/0"
-  vpc_endpoint_id       = data.aws_networkfirewall_firewall.main.firewall_status[0].sync_states[0].endpoint_id
-}
-
-# Route from firewall to NAT Gateway
-resource "aws_route" "to_nat" {
-  route_table_id         = var.private_route_table_id
-  destination_cidr_block = "0.0.0.0/0"
-  nat_gateway_id         = var.nat_gateway_id
 }

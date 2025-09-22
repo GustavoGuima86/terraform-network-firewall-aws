@@ -1,11 +1,11 @@
 variable "vpc_id" {
-  description = "ID of the inspection VPC"
+  description = "ID of the inspection VPC where the firewall will be deployed"
   type        = string
 }
 
-variable "subnet_id" {
-  description = "ID of the subnet where the firewall endpoint will be placed"
-  type        = string
+variable "subnet_ids" {
+  description = "A list of subnet IDs where the firewall endpoints will be placed (one per AZ)"
+  type        = list(string)
 }
 
 variable "name_prefix" {
@@ -16,24 +16,11 @@ variable "name_prefix" {
 variable "stateful_rules" {
   description = "List of Suricata-compatible rules for the stateful rule group"
   type        = list(string)
-}
-
-variable "private_route_table_id" {
-  description = "ID of the private subnet route table"
-  type        = string
-}
-
-variable "tgw_attachment_route_table_id" {
-  description = "ID of the TGW attachment subnet route table"
-  type        = string
-}
-
-variable "nat_gateway_id" {
-  description = "ID of the NAT Gateway"
-  type        = string
+  default     = []
 }
 
 variable "tags" {
   description = "Additional tags for all resources"
   type        = map(string)
   default     = {}
+}
