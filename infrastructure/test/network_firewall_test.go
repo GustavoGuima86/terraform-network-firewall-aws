@@ -2,55 +2,94 @@ package test
 
 import (
 	"context"
+	"os"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/gruntwork-io/terratest/modules/terraform"
+	test_structure "github.com/gruntwork-io/terratest/modules/test-structure"
 	"github.com/stretchr/testify/assert"
 )
 
-// An example of how to test the network firewall infrastructure.
 func TestNetworkFirewall(t *testing.T) {
 	t.Parallel()
 
-	// The AWS region to deploy to. This should match the region in your terraform.tfvars.
+	// Test configuration
 	awsRegion := "eu-central-1"
+	availabilityZones := []string{"eu-central-1a", "eu-central-1b"}
 
-	// Configure Terraform options.
+	// Skip cleanup if SKIP_CLEANUP is set
+	skipCleanup := os.Getenv("SKIP_CLEANUP") != ""
+
+	// Set test stages directory
+	testFolder := "."
+	test_structure.SaveString(t, testFolder, "region", awsRegion)
+
 	terraformOptions := &terraform.Options{
-		// The path to where your Terraform code is located.
 		TerraformDir: "..",
-
-		// Variables to pass to our Terraform code using -var options.
-		// Vars: map[string]interface{}{
-		// 	"project_prefix": "terratest-fw",
-		// },
+		VarFiles:     []string{"test/terraform.tfvars"},
+		NoColor:      true,
+		// Variables
+		Vars: map[string]interface{}{
+			"aws_region":         awsRegion,
+			"availability_zones": availabilityZones,
+		},
+		// Retry configuration for slow operations
+		MaxRetries:         60,
+		TimeBetweenRetries: 30 * time.Second,
+		RetryableTerraformErrors: map[string]string{
+			".*Error creating Network Firewall.*":   "Waiting for Network Firewall to be created...",
+			".*Error deleting Network Firewall.*":   "Waiting for Network Firewall to be deleted...",
+			".*RequestError: send request failed.*": "Waiting for AWS API to be available...",
+		},
 	}
 
-	// At the end of the test, run `terraform destroy` to clean up any resources that were created.
-	defer terraform.Destroy(t, terraformOptions)
+	// Save options for later stages
+	test_structure.SaveTerraformOptions(t, testFolder, terraformOptions)
 
-	// Run `terraform init` and `terraform apply`. Fail the test if there are any errors.
-	terraform.InitAndApply(t, terraformOptions)
+	// Cleanup only if not skipped
+	if !skipCleanup {
+		defer test_structure.RunTestStage(t, "cleanup", func() {
+			terraformOptions := test_structure.LoadTerraformOptions(t, testFolder)
+			terraform.Destroy(t, terraformOptions)
+		})
+	}
 
-	// --- Validation --- //
-
-	// Get the ID of the Transit Gateway from the Terraform output.
-	tgwId := terraform.Output(t, terraformOptions, "transit_gateway_id")
-
-	// Use the AWS SDK to verify that the Transit Gateway exists.
-	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(awsRegion))
-	assert.NoError(t, err, "Failed to load AWS config")
-
-	client := ec2.NewFromConfig(cfg)
-
-	_, err = client.DescribeTransitGateways(context.TODO(), &ec2.DescribeTransitGatewaysInput{
-		TransitGatewayIds: []string{tgwId},
+	// Initialize terraform
+	test_structure.RunTestStage(t, "init", func() {
+		terraformOptions := test_structure.LoadTerraformOptions(t, testFolder)
+		terraform.Init(t, terraformOptions)
 	})
 
-	// Assert that the DescribeTransitGateways call was successful (meaning the TGW was found).
-	assert.NoError(t, err, "Transit Gateway not found")
+	// Deploy the infrastructure
+	test_structure.RunTestStage(t, "apply", func() {
+		terraformOptions := test_structure.LoadTerraformOptions(t, testFolder)
+		terraform.Apply(t, terraformOptions)
+	})
 
-	// Add more assertions here to validate VPCs, subnets, routes, firewall, etc.
+	// Validate the infrastructure
+	test_structure.RunTestStage(t, "validate", func() {
+		terraformOptions := test_structure.LoadTerraformOptions(t, testFolder)
+		awsRegion := test_structure.LoadString(t, testFolder, "region")
+
+		// Validate Transit Gateway
+		tgwId := terraform.Output(t, terraformOptions, "transit_gateway_id")
+		assert.NotEmpty(t, tgwId, "Transit Gateway ID should not be empty")
+
+		cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(awsRegion))
+		if err != nil {
+			t.Fatalf("Failed to load AWS config: %v", err)
+		}
+
+		client := ec2.NewFromConfig(cfg)
+
+		tgwOutput, err := client.DescribeTransitGateways(context.TODO(), &ec2.DescribeTransitGatewaysInput{
+			TransitGatewayIds: []string{tgwId},
+		})
+
+		assert.NoError(t, err, "Transit Gateway not found")
+		assert.NotEmpty(t, tgwOutput.TransitGateways, "Transit Gateway details should not be empty")
+	})
 }

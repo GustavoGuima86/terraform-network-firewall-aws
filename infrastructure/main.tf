@@ -1,48 +1,3 @@
-provider "aws" {
-  region = var.aws_region
-}
-
-# --- Local Variables for Subnet Calculation, Rules, and Routing ---
-locals {
-  # --- Subnet Calculations ---
-  inspection_vpc_public_subnets     = [for i, az in var.availability_zones : cidrsubnet(var.inspection_vpc_cidr, 8, i * 4 + 0)]
-  inspection_vpc_private_subnets    = [for i, az in var.availability_zones : cidrsubnet(var.inspection_vpc_cidr, 8, i * 4 + 1)]
-  inspection_vpc_attachment_subnets = [for i, az in var.availability_zones : cidrsubnet(var.inspection_vpc_cidr, 8, i * 4 + 2)]
-  inspection_vpc_firewall_subnets   = [for i, az in var.availability_zones : cidrsubnet(var.inspection_vpc_cidr, 8, i * 4 + 3)] # New firewall subnets
-
-  spoke_vpc_subnets = { for k, v in var.spoke_vpcs : k => {
-    private    = [for i, az in var.availability_zones : cidrsubnet(v.cidr_block, 8, i * 2 + 0)]
-    attachment = [for i, az in var.availability_zones : cidrsubnet(v.cidr_block, 8, i * 2 + 1)]
-  } }
-
-  # --- Stateful Firewall Rules ---
-  stateful_rules = [
-    "pass tls $HOME_NET any -> any any (tls.sni; content:\".github.com\"; endswith; msg:\"Allowing GitHub access\"; sid:1;)",
-    "pass tls $HOME_NET any -> any any (tls.sni; content:\".amazonlinux.com\"; endswith; msg:\"Allowing Amazon Linux repository access\"; sid:2;)",
-    "pass ip $HOME_NET any -> 8.8.8.8 any (msg:\"Allowing Google DNS\"; sid:3;)"
-  ]
-
-  # --- Flattened Data for Routing (Fixes for_each errors) ---
-  # Create a flat list of all private route tables in all spoke VPCs
-  spoke_private_routes = flatten([
-    for spoke_name, vpc in module.spoke_vpcs :
-    [for i, rt_id in vpc.private_route_table_ids : {
-      key   = "${spoke_name}-priv-rt-${i}"
-      rt_id = rt_id
-    }]
-  ])
-
-  # Create a flat list for routes from public subnets back to all spoke VPCs
-  inspection_public_to_spoke_routes = flatten([
-    for i, rt_id in module.inspection_vpc.public_route_table_ids :
-    [for cidr_name, cidr_details in var.spoke_vpcs : {
-      key   = "${i}-${cidr_name}"
-      rt_id = rt_id
-      cidr  = cidr_details.cidr_block
-    }]
-  ])
-}
-
 # --- VPC Modules ---
 module "inspection_vpc" {
   source = "../modules/vpc"
@@ -76,12 +31,24 @@ module "spoke_vpcs" {
 }
 
 # --- Core Networking Modules ---
+# Create the Transit Gateway
 module "transit_gateway" {
   source = "../modules/transit_gateway"
 
-  name_prefix             = var.project_prefix
-  inspection_vpc_id       = module.inspection_vpc.vpc_id
-  inspection_subnet_ids   = module.inspection_vpc.attachment_subnet_ids
+  name_prefix = var.project_prefix
+  tags       = var.tags
+}
+
+# Handle VPC attachments to the Transit Gateway
+module "vpc_attachments" {
+  source = "../modules/vpc_attachments"
+
+  name_prefix              = var.project_prefix
+  transit_gateway_id       = module.transit_gateway.transit_gateway_id
+  inspection_vpc_id        = module.inspection_vpc.vpc_id
+  inspection_subnet_ids    = module.inspection_vpc.attachment_subnet_ids
+  inspection_route_table_id = module.transit_gateway.inspection_route_table_id
+  spoke_route_table_id     = module.transit_gateway.spoke_route_table_id
 
   spoke_vpcs = [for name, vpc in module.spoke_vpcs : {
     name       = name
@@ -91,18 +58,18 @@ module "transit_gateway" {
 
   tags = var.tags
 
-  depends_on = [module.inspection_vpc, module.spoke_vpcs]
+  depends_on = [module.transit_gateway, module.inspection_vpc, module.spoke_vpcs]
 }
 
+# Network Firewall Module
 module "network_firewall" {
   source = "../modules/network_firewall"
 
   name_prefix    = var.project_prefix
   vpc_id         = module.inspection_vpc.vpc_id
-  subnet_ids     = module.inspection_vpc.firewall_subnet_ids # Use dedicated firewall subnets
+  subnet_ids     = module.inspection_vpc.firewall_subnet_ids
   stateful_rules = local.stateful_rules
-
-  tags = var.tags
+  tags           = var.tags
 
   depends_on = [module.inspection_vpc]
 }
